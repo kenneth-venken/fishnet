@@ -1,4 +1,4 @@
-use std::{io, mem, num::NonZeroU8, path::PathBuf, process::Stdio, str::FromStr, time::Duration};
+use std::{env, io, mem, num::NonZeroU8, path::PathBuf, process::Stdio, str::FromStr, time::Duration};
 
 use shakmaty::uci::UciMove;
 use tokio::{
@@ -15,7 +15,11 @@ use crate::{
     util::NevermindExt as _,
 };
 
-pub fn channel(exe: PathBuf, logger: Logger) -> (StockfishStub, StockfishActor) {
+pub fn channel(mut exe: PathBuf, logger: Logger) -> (StockfishStub, StockfishActor) {
+    if let Ok(path) = env::var("STOCKFISH_PATH") {
+        exe = PathBuf::from(path);
+    }
+
     let (tx, rx) = mpsc::channel(1);
     (
         StockfishStub { tx },

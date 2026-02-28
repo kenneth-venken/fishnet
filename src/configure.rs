@@ -45,8 +45,8 @@ pub struct Opt {
     #[arg(long, value_parser = PathBufValueParser::new(), conflicts_with = "key", global = true)]
     pub key_file: Option<PathBuf>,
 
-    /// Lichess HTTP endpoint. Defaults to https://lichess.org/fishnet.
-    #[arg(long, global = true)]
+    /// Lichess HTTP endpoint. Defaults to http://localhost:8001.
+    #[arg(short = 's', long, global = true)]
     pub endpoint: Option<Endpoint>,
 
     /// Number of logical CPU cores to use for engine processes
@@ -94,7 +94,7 @@ pub struct Endpoint {
 
 impl Default for Endpoint {
     fn default() -> Endpoint {
-        "https://lichess.org/fishnet"
+        "http://localhost:8001"
             .parse()
             .expect("default endpoint is valid")
     }

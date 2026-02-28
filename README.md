@@ -5,7 +5,7 @@
 
 ## Installation
 
-1. Request your personal fishnet key: https://lichess.org/get-fishnet
+1. Request your personal fishnet key for production on lichess.org: https://lichess.org/get-fishnet
 
 2. Install and run the fishnet client.
 
@@ -25,9 +25,10 @@
    **Useful commands**
 
    ```sh
-   ./fishnet configure              # Rerun config dialog
-   ./fishnet systemd --auto-update  # Print a .service file
-   ./fishnet --help                 # List commands and options
+   ./fishnet configure                        # Rerun config dialog (production lichess.org by default)
+   ./fishnet systemd --auto-update            # Print a .service file
+   ./fishnet --help                           # List commands and options
+   ./fishnet -s http://localhost:8001 -k KEY  # Connect to a local development server
    ```
 
    **Other installation methods:**
@@ -36,7 +37,19 @@
    [Kubernetes](/doc/install.md#kubernetes),
    [OpenShift](/doc/openshift/README.md)
 
-3. Pick an update strategy.
+3. (Optional) For local development, fishnet can talk to a non‑production server.
+
+   By default the client connects to `https://lichess.org/fishnet`. When you run a
+   local or development instance of the fishnet server, you can override the endpoint
+   on the command line:
+
+   ```sh
+   ./fishnet -s http://localhost:8001 -k YOUR_KEY
+   # or equivalently
+   ./fishnet --endpoint http://localhost:8001 --key YOUR_KEY
+   ```
+
+4. Pick an update strategy.
 
    **Automatic updates**
 
@@ -77,6 +90,24 @@ for chess variants.
 - Low-bandwidth network communication with Lichess servers
   (only outgoing HTTP requests, so probably no firewall configuration
   required, IPv4 not required)
+
+### How do I configure the Stockfish binary?
+
+By default fishnet uses the bundled Stockfish/Fairy-Stockfish binaries that are
+downloaded and managed automatically. If you want to point fishnet at a custom
+engine binary (for example a locally built Stockfish), set the `STOCKFISH_PATH`
+environment variable before starting the client:
+
+```sh
+STOCKFISH_PATH=/path/to/stockfish ./fishnet …
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:STOCKFISH_PATH = "C:\path\to\stockfish.exe"
+.\fishnet.exe
+```
 
 ### Is my CPU fast enough?
 
