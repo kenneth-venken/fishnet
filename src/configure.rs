@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::{api, logger::Logger};
 
-/// Distributed Stockfish analysis for lichess.org.
+/// Distributed Stockfish analysis for maxpv.org.
 #[derive(Debug, Parser)]
 #[command(version, disable_help_subcommand = true)]
 pub struct Opt {
@@ -45,7 +45,7 @@ pub struct Opt {
     #[arg(long, value_parser = PathBufValueParser::new(), conflicts_with = "key", global = true)]
     pub key_file: Option<PathBuf>,
 
-    /// Lichess HTTP endpoint. Defaults to http://localhost:8001.
+    /// MaxPV HTTP endpoint. Defaults to http://localhost:8001.
     #[arg(short = 's', long, global = true)]
     pub endpoint: Option<Endpoint>,
 
@@ -120,7 +120,7 @@ impl FromStr for Endpoint {
 
 impl Endpoint {
     fn is_development(&self) -> bool {
-        self.url.host_str() != Some("lichess.org")
+        self.url.host_str() != Some("maxpv.org")
     }
 }
 
@@ -387,7 +387,7 @@ fn intro() {
     println!(r#"#        `\_   ===    \.  |     |  _| | \__ \ | | | |\  |  __/ |_"#);
     println!(r#"#        / /\_   \ /      |     |_|   |_|___/_| |_|_| \_|\___|\__| {}"#, env!("CARGO_PKG_VERSION"));
     println!(r#"#        |/   \_  \|      /"#);
-    println!(r#"#               \________/      Distributed Stockfish analysis for lichess.org"#);
+    println!(r#"#               \________/      Distributed Stockfish analysis for maxpv.org"#);
 }
 
 pub async fn parse_and_configure(client: &Client) -> Opt {
@@ -460,7 +460,7 @@ pub async fn parse_and_configure(client: &Client) -> Opt {
                     false
                 } else {
                     eprint!(
-                        "Personal fishnet key (append ! to force, https://lichess.org/get-fishnet): "
+                        "Personal fishnet key (append ! to force, https://maxpv.org/get-fishnet): "
                     );
                     true
                 };
