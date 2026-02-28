@@ -102,7 +102,8 @@ impl Default for Endpoint {
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.url, f)
+        // Avoid trailing slash so `format!("{}/acquire", endpoint)` does not produce `//acquire`
+        write!(f, "{}", self.url.as_str().trim_end_matches('/'))
     }
 }
 
