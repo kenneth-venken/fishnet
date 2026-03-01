@@ -16,9 +16,40 @@ use crate::{
 };
 
 pub fn channel(mut exe: PathBuf, logger: Logger) -> (StockfishStub, StockfishActor) {
+    // 1. Highest priority: env var
     if let Ok(path) = env::var("STOCKFISH_PATH") {
         exe = PathBuf::from(path);
+        logger.info(&format!("Using STOCKFISH_PATH env: {}", exe.display()));
     }
+    // 2. Second priority: engine= from fishnet.ini
+    else if let Ok(content) = std::fs::read_to_string("fishnet.ini") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("engine=") || line.starts_with("engine =") {
+                if let Some(eq) = line.find('=') {
+                    let value = line[eq + 1..].trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !value.is_empty() {
+                        exe = PathBuf::from(value);
+                        logger.info(&format!("Loaded engine from fishnet.ini: {}", value));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // 3. Fallback: CWD
+    else if let Some(name) = exe.file_name() {
+         let cwd_path = std::env::current_dir().unwrap_or_default().join(name);
+         if cwd_path.exists() {
+             exe = cwd_path;
+             logger.info(&format!("Using engine from CWD: {}", exe.display()));
+         }
+     }
+
+     // Make absolute path (safer for spawn)
+     if let Ok(abs) = exe.canonicalize() {
+         exe = abs;
+     }
 
     let (tx, rx) = mpsc::channel(1);
     (
@@ -146,6 +177,22 @@ impl StockfishActor {
     }
 
     async fn run_inner(mut self) -> Result<(), EngineError> {
+        // === AUTOMATIC CWD FALLBACK ===
+        if !self.exe.exists() {
+            if let Some(name) = self.exe.file_name() {
+                let cwd_exe = std::env::current_dir().unwrap_or_default().join(name);
+                if cwd_exe.exists() {
+                    self.logger.info(&format!("✅ Fallback to CWD engine: {}", cwd_exe.display()));
+                    self.exe = cwd_exe;
+                } else {
+                    self.logger.error(&format!("❌ Engine not found in configured path or CWD: {}", self.exe.display()));
+                    return Err(EngineError::IoError(io::Error::new(io::ErrorKind::NotFound, "engine not found")));
+                }
+            }
+        } else {
+            self.logger.debug(&format!("✅ Engine file EXISTS on disk: {}", self.exe.display()));
+        }
+
         let mut child = new_process_group(&mut Command::new(&self.exe))
             .current_dir(self.exe.parent().expect("absolute path"))
             .stdout(Stdio::piped())

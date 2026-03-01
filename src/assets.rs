@@ -1,18 +1,11 @@
 use std::{
     fmt,
-    fs::File,
     io,
-    path::{Path, PathBuf},
-    str,
+    path::PathBuf,
 };
 
-use ar::Archive;
 use bitflags::bitflags;
 use serde::Serialize;
-use tempfile::TempDir;
-use zstd::stream::read::Decoder as ZstdDecoder;
-
-static ASSETS_AR_ZST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/assets.ar.zst"));
 
 bitflags! {
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -199,7 +192,7 @@ impl EvalFlavor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stockfish {
     pub name: String,
     pub path: PathBuf,
@@ -208,68 +201,25 @@ pub struct Stockfish {
 #[derive(Debug)]
 pub struct Assets {
     pub stockfish: ByEngineFlavor<Stockfish>,
-    _dir: TempDir, // Will be deleted when dropped
 }
 
 impl Assets {
-    pub fn prepare(cpu: Cpu) -> io::Result<Assets> {
-        let mut stockfish = ByEngineFlavor::<Option<Stockfish>>::default();
-        let dir = tempfile::Builder::new().prefix("fishnet-").tempdir()?;
-
-        let mut archive = Archive::new(ZstdDecoder::new(ASSETS_AR_ZST)?);
-        while let Some(entry) = archive.next_entry() {
-            let mut entry = entry?;
-            let filename = str::from_utf8(entry.header().identifier()).expect("utf-8 filename");
-            let target_path = dir.path().join(filename); // Trusted
-            if filename.starts_with("stockfish-") {
-                if stockfish.official.is_none() && cpu.contains(Cpu::requirements(filename)) {
-                    stockfish.official = Some(Stockfish {
-                        name: filename.to_owned(),
-                        path: target_path.clone(),
-                    });
-                } else {
-                    continue;
-                }
-            }
-            if filename.starts_with("fairy-stockfish-") {
-                if stockfish.multi_variant.is_none() && cpu.contains(Cpu::requirements(filename)) {
-                    stockfish.multi_variant = Some(Stockfish {
-                        name: filename.to_owned(),
-                        path: target_path.clone(),
-                    });
-                } else {
-                    continue;
-                }
-            }
-            let mode = entry.header().mode();
-            io::copy(&mut entry, &mut create_file(&target_path, mode)?)?;
-        }
-
+    pub fn prepare(_cpu: Cpu) -> io::Result<Assets> {
+        // No temp-dir, no archive, no copy anymore.
+        // We only return dummy names → stockfish.rs resolves the actual path.
         Ok(Assets {
             stockfish: ByEngineFlavor {
-                official: stockfish.official.expect("compatible stockfish"),
-                multi_variant: stockfish
-                    .multi_variant
-                    .expect("compatible multi-variant stockfish"),
+                official: Stockfish {
+                    name: "stockfish-x86-64-avx512icl.exe".to_string(),
+                    path: PathBuf::from("stockfish-x86-64-avx512icl.exe"),
+                },
+                multi_variant: Stockfish {
+                    name: "fairy-stockfish-x86-64-vnni512.exe".to_string(),
+                    path: PathBuf::from("fairy-stockfish-x86-64-vnni512.exe"),
+                },
             },
-            _dir: dir,
         })
     }
-}
-
-#[cfg(unix)]
-fn create_file(path: &Path, mode: u32) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    File::options()
-        .create_new(true)
-        .write(true)
-        .mode(mode)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_file(path: &Path, _mode: u32) -> io::Result<File> {
-    File::options().create_new(true).write(true).open(path)
 }
 
 #[cfg(test)]
