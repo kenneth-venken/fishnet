@@ -20,6 +20,7 @@ use std::{
     sync::Arc,
     thread,
     time::{Duration, Instant},
+    num::NonZeroUsize,
 };
 
 use reqwest::Client;
@@ -33,7 +34,7 @@ use tokio::{
 
 use crate::{
     assets::{Assets, ByEngineFlavor, Cpu, EngineFlavor},
-    configure::{Command, Cores, CpuPriority, Opt},
+    configure::{Command, CpuPriority, Opt},
     ipc::{Chunk, ChunkFailed, Pull},
     logger::{Logger, ProgressAt},
     update::{UpdateSuccess, auto_update},
@@ -104,8 +105,16 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
         )
     ));
 
-    let cores = opt.cores.unwrap_or(Cores::Auto).number();
-    logger.info(&format!("Cores: {cores}"));
+    // MAXPV: Force concurrency = 1 by default for deep analysis (depth 60+)
+    // Important: 1 engine = full force of machine (cores-2 threads)
+    let cores = opt.cores
+        .map(|c| c.number())
+        .unwrap_or(NonZeroUsize::new(1).unwrap());
+
+    logger.info(&format!(
+        "maxPV concurrency forced to {} (default for deep analysis)",
+        cores
+    ));
 
     // Install handler for SIGTERM.
     #[cfg(unix)]

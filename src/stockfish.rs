@@ -267,16 +267,39 @@ impl StockfishActor {
             stdin
                 .write_line("setoption name UCI_Chess960 value true")
                 .await?;
+
+            // === MAXPV THREAD ALLOCATION (jouw verzoek) ===
+            let cores = num_cpus::get();
+            let threads = (cores.saturating_sub(2)).max(1);  // reserveer 2 cores voor OS
+            let hash_mb = match cores {
+                c if c >= 16 => 16384,
+                c if c >= 8  => 8192,
+                c if c >= 4  => 4096,
+                _            => 2048,
+            };
+
+            self.logger.info(&format!(
+                "🚀 maxPV engine gestart | {} cores → {} threads + {}MB Hash (concurrency=1 aanbevolen)",
+                cores, threads, hash_mb
+            ));
+
+            stdin.write_line(&format!("setoption name Threads value {}", threads)).await?;
+            stdin.write_line(&format!("setoption name Hash value {}", hash_mb)).await?;
+            stdin.write_line("setoption name UCI_AnalyseMode value true").await?;
+            stdin.write_line("setoption name Use NNUE value true").await?;
+            stdin.write_line("setoption name Contempt value 0").await?;
+            stdin.write_line("setoption name SlowMover value 100").await?;
+            stdin.write_line("clear hash").await?;
+
             stdin.write_line("isready").await?;
             stdin.flush().await?;
 
             loop {
                 let line = stdout.read_line().await?;
                 if line.trim_end() == "readyok" {
-                    self.logger.debug("Engine is ready");
+                    self.logger.debug("Engine is ready with maxPV settings");
                     break;
                 } else if !line.starts_with("Stockfish ") && !line.starts_with("Fairy-Stockfish ") {
-                    // ignore preamble
                     self.logger.warn(&format!(
                         "Unexpected engine initialization output: {}",
                         line.trim_end()
@@ -394,17 +417,21 @@ impl StockfishActor {
 
                 go
             }
+
             Work::Analysis { nodes, depth, .. } => {
-                let mut go = vec![
-                    "go".to_owned(),
-                    "nodes".to_owned(),
-                    nodes.get(eval_flavor).to_string(),
-                ];
+                let mut go = vec!["go".to_owned()];
 
-                if let Some(depth) = depth {
-                    go.extend_from_slice(&["depth".to_owned(), depth.to_string()]);
+                if let Some(d) = depth {
+                    // MAXPV deep analysis: only depth, NO nodes limit, NO timeout
+                    go.extend_from_slice(&["depth".to_owned(), d.to_string()]);
+                    self.logger.info(&format!("Starting deep analysis → go depth {}", d));
+                } else {
+                    // Old Lichess nodes behavior: only nodes
+                    go.extend_from_slice(&[
+                        "nodes".to_owned(),
+                        nodes.get(eval_flavor).to_string(),
+                    ]);
                 }
-
                 go
             }
         };

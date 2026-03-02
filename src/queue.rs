@@ -589,7 +589,7 @@ impl IncomingBatch {
                 Work::Move { .. } => {
                     vec![Chunk {
                         work: body.work.clone(),
-                        deadline: Instant::now() + body.work.timeout_per_ply(),
+                        deadline: Instant::now() + body.work.timeout_per_ply().expect("Move always has timeout"),  // originele 7s
                         flavor,
                         variant: body.variant,
                         positions: vec![Position {
@@ -606,8 +606,11 @@ impl IncomingBatch {
                     // Iterate forwards to prepare positions.
                     let mut moves = Vec::new();
                     let num_positions = body_moves.len() + 1;
-                    let deadline =
-                        Instant::now() + body.work.timeout_per_ply() * num_positions as u32;
+
+                    // MAXPV FIX: No timeout = very large deadline (10 years, enough for depth 60+)
+                    let timeout_per_ply = body.work.timeout_per_ply().unwrap_or(Duration::from_secs(60 * 60 * 24 * 365 * 10));  // ~10 years per ply
+                    let deadline = Instant::now() + timeout_per_ply * num_positions as u32;
+
                     let mut positions = Vec::with_capacity(num_positions);
                     positions.push(Position {
                         work: body.work.clone(),
@@ -635,10 +638,8 @@ impl IncomingBatch {
                             moves: moves.clone(),
                         });
                     }
-
                     // Reverse for backwards analysis.
                     positions.reverse();
-
                     // Prepare dummy positions, so the respective previous
                     // position is available when creating chunks.
                     let prev_and_current: Vec<(Option<Position>, Position)> = zip(
@@ -661,7 +662,6 @@ impl IncomingBatch {
                         positions,
                     )
                     .collect();
-
                     // Create chunks with overlap.
                     let mut chunks = Vec::new();
                     for prev_and_current_chunked in
@@ -688,7 +688,6 @@ impl IncomingBatch {
                             });
                         }
                     }
-
                     // Edge case: Batch is immediately completed, because all
                     // positions are skipped.
                     if chunks.is_empty() {
@@ -702,7 +701,6 @@ impl IncomingBatch {
                             total_cpu_time: Duration::ZERO,
                         }));
                     }
-
                     chunks
                 }
             },

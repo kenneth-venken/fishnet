@@ -140,8 +140,9 @@ pub enum Work {
         depth: Option<u8>,
         #[serde(default)]
         multipv: Option<NonZeroU8>,
-        #[serde_as(as = "DurationMilliSeconds<u64>")]
-        timeout: Duration,
+        #[serde(default)]
+        #[serde_as(as = "Option<DurationMilliSeconds>")]
+        timeout: Option<Duration>,
     },
     #[serde(rename = "move")]
     Move {
@@ -155,15 +156,17 @@ pub enum Work {
 
 impl Work {
     pub fn id(&self) -> BatchId {
-        match *self {
-            Work::Analysis { id, .. } | Work::Move { id, .. } => id,
+        match self {
+            Work::Analysis { id, .. } | Work::Move { id, .. } => *id,
         }
     }
 
-    pub fn timeout_per_ply(&self) -> Duration {
-        match *self {
-            Work::Analysis { timeout, .. } => timeout,
-            Work::Move { .. } => Duration::from_secs(7),
+    /// Returns None = geen timeout (maxPV diepe analyse)
+    /// Returns Some = oude Lichess timeout gedrag
+    pub fn timeout_per_ply(&self) -> Option<Duration> {
+        match self {
+            Work::Analysis { timeout, .. } => *timeout,
+            Work::Move { .. } => Some(Duration::from_secs(7)),
         }
     }
 
@@ -176,8 +179,8 @@ impl Work {
     }
 
     pub fn multipv(&self) -> NonZeroU8 {
-        match *self {
-            Work::Analysis { multipv, .. } => multipv,
+        match self {
+            Work::Analysis { multipv, .. } => *multipv,
             Work::Move { .. } => None,
         }
         .unwrap_or_else(|| NonZeroU8::new(1).unwrap())
@@ -185,7 +188,7 @@ impl Work {
 
     pub fn matrix_wanted(&self) -> bool {
         matches!(
-            *self,
+            self,
             Work::Analysis {
                 multipv: Some(_),
                 ..

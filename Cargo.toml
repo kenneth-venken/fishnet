@@ -26,6 +26,7 @@ strip = true
 lto = true
 
 [dependencies]
+num_cpus = "1.16"
 arrayvec = "0.7"
 bitflags = "2"
 clap = { version = "4", features = ["derive", "deprecated", "wrap_help"] }
