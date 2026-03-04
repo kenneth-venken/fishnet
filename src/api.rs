@@ -135,7 +135,8 @@ pub enum Work {
     Analysis {
         #[serde_as(as = "DisplayFromStr")]
         id: BatchId,
-        nodes: NodeLimit,
+        #[serde(default)]
+        nodes: Option<NodeLimit>,
         #[serde(default)]
         depth: Option<u8>,
         #[serde(default)]

@@ -427,6 +427,8 @@ impl StockfishActor {
                     self.logger.info(&format!("Starting deep analysis → go depth {}", d));
                 } else {
                     // Old Lichess nodes behavior: only nodes
+                    let nodes =
+                        nodes.expect("analysis work must provide either depth or nodes");
                     go.extend_from_slice(&[
                         "nodes".to_owned(),
                         nodes.get(eval_flavor).to_string(),
