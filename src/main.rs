@@ -15,16 +15,17 @@ mod util;
 use std::{
     env, io,
     io::IsTerminal as _,
+    num::NonZeroUsize,
     path::PathBuf,
     process,
     sync::Arc,
     thread,
     time::{Duration, Instant},
-    num::NonZeroUsize,
 };
 
 use reqwest::Client;
 use shell_escape::escape;
+use sysinfo::System;
 use tokio::{
     signal,
     sync::{mpsc, oneshot},
@@ -105,15 +106,58 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
         )
     ));
 
-    // MAXPV: Force concurrency = 1 by default for deep analysis (depth 60+)
-    // Important: 1 engine = full force of machine (cores-2 threads)
-    let cores = opt.cores
+    // Max threads from CPU: reserve 2 for OS.
+    let max_threads_cpu: usize = thread::available_parallelism()
+        .map(|n| (n.get().saturating_sub(2)).max(1))
+        .unwrap_or(1);
+
+    // Max threads from RAM: use 70% of physical RAM, minimum 128 MB per thread.
+    let ram_mb: usize = {
+        let mut sys = System::new_all();
+        sys.refresh_memory();
+        (sys.total_memory() / (1024 * 1024)) as usize
+    };
+    let available_mem_mb = (ram_mb * 70) / 100;
+    let max_threads_ram = (available_mem_mb / 128).max(1);
+
+    let total_threads = max_threads_cpu.min(max_threads_ram);
+
+    logger.info(&format!(
+        "Resources: {} MB RAM (70% = {} MB for engines), max {} threads (CPU), max {} (RAM @ 128 MB/thread) → {} threads",
+        ram_mb, available_mem_mb, max_threads_cpu, max_threads_ram, total_threads
+    ));
+
+    let requested_cores = opt.cores
         .map(|c| c.number())
         .unwrap_or(NonZeroUsize::new(1).unwrap());
 
+    let (cores, thread_distribution) = if requested_cores.get() > total_threads {
+        logger.warn(&format!(
+            "Requested {} engines but only {} threads available. Starting at most {} engines.",
+            requested_cores,
+            total_threads,
+            total_threads
+        ));
+        let capped = NonZeroUsize::new(total_threads).unwrap_or(NonZeroUsize::MIN);
+        let dist = distribute_threads(total_threads, capped.get());
+        (capped, dist)
+    } else {
+        let dist = distribute_threads(total_threads, requested_cores.get());
+        (requested_cores, dist)
+    };
+
+    let per_thread_mb = (available_mem_mb / total_threads).max(128);
+    let hash_distribution: Vec<usize> = thread_distribution
+        .iter()
+        .map(|&t| per_thread_mb * t)
+        .collect();
+
     logger.info(&format!(
-        "maxPV concurrency forced to {} (default for deep analysis)",
-        cores
+        "maxPV concurrency: {} engine(s), threads: {:?}, hash (MB): {:?} ({} MB/thread)",
+        cores,
+        thread_distribution,
+        hash_distribution,
+        per_thread_mb
     ));
 
     // Install handler for SIGTERM.
@@ -164,7 +208,9 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
             let assets = assets.clone();
             let tx = tx.clone();
             let logger = logger.clone();
-            join_set.spawn(worker(i, assets, tx, logger));
+            let threads = thread_distribution[i];
+            let hash_mb = hash_distribution[i];
+            join_set.spawn(worker(i, assets, tx, logger, threads, hash_mb));
         }
         rx
     };
@@ -269,7 +315,26 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
     }
 }
 
-async fn worker(i: usize, assets: Arc<Assets>, tx: mpsc::Sender<Pull>, logger: Logger) {
+/// Distributes `total_threads` evenly across `num_engines`.
+/// Returns a vec of length `num_engines` that sums to `total_threads`
+/// (e.g. 10 threads, 3 engines → [4, 3, 3]; 32 threads, 7 engines → [5, 5, 5, 5, 4, 4, 4]).
+fn distribute_threads(total_threads: usize, num_engines: usize) -> Vec<usize> {
+    assert!(num_engines >= 1 && num_engines <= total_threads);
+    let base = total_threads / num_engines;
+    let remainder = total_threads % num_engines;
+    (0..num_engines)
+        .map(|i| base + if i < remainder { 1 } else { 0 })
+        .collect()
+}
+
+async fn worker(
+    i: usize,
+    assets: Arc<Assets>,
+    tx: mpsc::Sender<Pull>,
+    logger: Logger,
+    threads: usize,
+    hash_mb: usize,
+) {
     logger.debug(&format!("Started worker {i}."));
 
     let mut chunk: Option<Chunk> = None;
@@ -306,8 +371,12 @@ async fn worker(i: usize, assets: Arc<Assets>, tx: mpsc::Sender<Pull>, logger: L
                 }
 
                 // Start engine and spawn actor.
-                let (sf, sf_actor) =
-                    stockfish::channel(assets.stockfish.get(flavor).path.clone(), logger.clone());
+                let (sf, sf_actor) = stockfish::channel(
+                    assets.stockfish.get(flavor).path.clone(),
+                    logger.clone(),
+                    threads,
+                    hash_mb,
+                );
                 let join_handle = tokio::spawn(sf_actor.run());
                 (sf, join_handle)
             };

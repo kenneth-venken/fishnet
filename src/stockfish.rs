@@ -15,7 +15,7 @@ use crate::{
     util::NevermindExt as _,
 };
 
-pub fn channel(mut exe: PathBuf, logger: Logger) -> (StockfishStub, StockfishActor) {
+pub fn channel(mut exe: PathBuf, logger: Logger, threads: usize, hash_mb: usize) -> (StockfishStub, StockfishActor) {
     // 1. Highest priority: env var
     if let Ok(path) = env::var("STOCKFISH_PATH") {
         exe = PathBuf::from(path);
@@ -59,6 +59,8 @@ pub fn channel(mut exe: PathBuf, logger: Logger) -> (StockfishStub, StockfishAct
             exe,
             initialized: false,
             logger,
+            threads,
+            hash_mb,
         },
     )
 }
@@ -87,6 +89,8 @@ pub struct StockfishActor {
     exe: PathBuf,
     initialized: bool,
     logger: Logger,
+    threads: usize,
+    hash_mb: usize,
 }
 
 #[derive(Debug)]
@@ -268,19 +272,13 @@ impl StockfishActor {
                 .write_line("setoption name UCI_Chess960 value true")
                 .await?;
 
-            // === MAXPV THREAD ALLOCATION (jouw verzoek) ===
-            let cores = num_cpus::get();
-            let threads = (cores.saturating_sub(2)).max(1);  // reserveer 2 cores voor OS
-            let hash_mb = match cores {
-                c if c >= 16 => 16384,
-                c if c >= 8  => 8192,
-                c if c >= 4  => 4096,
-                _            => 2048,
-            };
+            // Thread count and hash are set by main (distributed across engines from RAM).
+            let threads = self.threads.max(1);
+            let hash_mb = self.hash_mb.max(128);
 
             self.logger.info(&format!(
-                "🚀 maxPV engine gestart | {} cores → {} threads + {}MB Hash (concurrency=1 aanbevolen)",
-                cores, threads, hash_mb
+                "🚀 maxPV engine: requesting Threads={} Hash={} MB (verify with -v to see engine echo)",
+                threads, hash_mb
             ));
 
             stdin.write_line(&format!("setoption name Threads value {}", threads)).await?;
@@ -296,14 +294,29 @@ impl StockfishActor {
 
             loop {
                 let line = stdout.read_line().await?;
-                if line.trim_end() == "readyok" {
+                let line = line.trim_end();
+                if line == "readyok" {
                     self.logger.debug("Engine is ready with maxPV settings");
                     break;
-                } else if !line.starts_with("Stockfish ") && !line.starts_with("Fairy-Stockfish ") {
+                }
+                // Ignore expected or benign output: engine banner, info strings, unsupported options
+                let benign = line.starts_with("Stockfish ")
+                    || line.starts_with("Fairy-Stockfish ")
+                    || line.starts_with("info string ")
+                    || line.contains("No such option:")
+                    || line.contains("Unknown command:");
+                if !benign {
                     self.logger.warn(&format!(
                         "Unexpected engine initialization output: {}",
-                        line.trim_end()
+                        line
                     ));
+                } else if line.starts_with("info string ") {
+                    // Echo engine confirmation of threads/hash so user can verify actual usage
+                    let rest = line.trim_start_matches("info string ");
+                    let lower = rest.to_lowercase();
+                    if lower.contains("thread") || lower.contains("hash") {
+                        self.logger.info(&format!("Engine reports: {}", rest));
+                    }
                 }
             }
         }
@@ -484,6 +497,18 @@ impl StockfishActor {
                         && !lowerbound
                         && !upperbound
                     {
+                        if depth > latest_depth {
+                            // Log per-depth progress for deep analysis (main PV only).
+                            self.logger.info(&format!(
+                                "Depth {} reached (batch {}, pos {:?}): nodes={}, time={:?}, nps={:?}",
+                                depth,
+                                position.work.id(),
+                                position.position_index,
+                                nodes.unwrap_or(latest_nodes),
+                                time.unwrap_or(latest_time),
+                                nps.or(latest_nps),
+                            ));
+                        }
                         latest_depth = depth;
                     }
                     if let Some(nodes) = nodes {
