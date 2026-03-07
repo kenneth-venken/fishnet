@@ -642,16 +642,17 @@ impl IncomingBatch {
                     positions.reverse();
                     // Prepare dummy positions, so the respective previous
                     // position is available when creating chunks.
+                    // Skip the overlap when there is only one position to avoid analysing it twice.
+                    let first_prev = if positions.len() > 1 {
+                        positions.first().cloned().map(|pos| Position {
+                            position_index: None,
+                            ..pos
+                        })
+                    } else {
+                        None
+                    };
                     let prev_and_current: Vec<(Option<Position>, Position)> = zip(
-                        once(positions.first().cloned().map(|pos| {
-                            // Repeat the last position, to offset that it
-                            // is analyzed with completely fresh hash.
-                            Position {
-                                position_index: None,
-                                ..pos
-                            }
-                        }))
-                        .chain(positions.clone().into_iter().map(
+                        once(first_prev).chain(positions.clone().into_iter().map(
                             |pos| {
                                 Some(Position {
                                     position_index: None,
@@ -814,8 +815,7 @@ impl CompletedBatch {
             .map(|p| {
                 Some(match p {
                     Skip::Skip => AnalysisPart::Skipped { skipped: true },
-                    Skip::Present(pos) if pos.work.matrix_wanted() => pos.into_matrix(),
-                    Skip::Present(pos) => pos.to_best(),
+                    Skip::Present(pos) => pos.into_matrix(),
                 })
             })
             .collect()
