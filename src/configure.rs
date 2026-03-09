@@ -54,6 +54,16 @@ pub struct Opt {
     #[arg(long, alias = "threads", global = true)]
     pub cores: Option<Cores>,
 
+    /// Upper bound for total engine memory in MB.
+    /// Acts as a cap: it can only reduce the automatic 70%-of-RAM limit.
+    #[arg(long, global = true)]
+    pub memory_limit: Option<usize>,
+
+    /// Upper bound for total engine threads.
+    /// Acts as a cap: it can only reduce the automatically detected limit.
+    #[arg(long, global = true)]
+    pub thread_limit: Option<usize>,
+
     /// Override CPU scheduling priorty of fishnet and engine processes.
     /// Very low by default.
     #[arg(long, global = true)]
@@ -617,6 +627,16 @@ pub async fn parse_and_configure(client: &Client) -> Opt {
             opt.cores = opt.cores.or_else(|| {
                 ini.get("Fishnet", "Cores")
                     .map(|c| c.parse().expect("valid cores"))
+            });
+
+            opt.memory_limit = opt.memory_limit.or_else(|| {
+                ini.get("Fishnet", "MemoryLimit")
+                    .map(|m| m.parse().expect("valid memory limit (MB)"))
+            });
+
+            opt.thread_limit = opt.thread_limit.or_else(|| {
+                ini.get("Fishnet", "ThreadLimit")
+                    .map(|t| t.parse().expect("valid thread limit"))
             });
 
             opt.backlog.user = opt.backlog.user.or_else(|| {

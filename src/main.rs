@@ -111,23 +111,39 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
         .map(|n| (n.get().saturating_sub(2)).max(1))
         .unwrap_or(1);
 
-    // Max threads from RAM: use 70% of physical RAM, minimum 128 MB per thread.
+    // Max threads from RAM: start from 70% of physical RAM, minimum 128 MB per thread.
     let ram_mb: usize = {
         let mut sys = System::new_all();
         sys.refresh_memory();
         (sys.total_memory() / (1024 * 1024)) as usize
     };
-    let available_mem_mb = (ram_mb * 70) / 100;
-    let max_threads_ram = (available_mem_mb / 128).max(1);
+    let default_available_mem_mb = (ram_mb * 70) / 100;
 
-    let total_threads = max_threads_cpu.min(max_threads_ram);
+    // Apply optional memory_limit (in MB) from CLI/ini as a cap:
+    // - cannot exceed the automatic 70% of physical RAM
+    // - can only reduce it
+    let engine_mem_mb = opt
+        .memory_limit
+        .unwrap_or(default_available_mem_mb)
+        .min(default_available_mem_mb);
+
+    let max_threads_ram = (engine_mem_mb / 128).max(1);
+
+    // Combine CPU and RAM limits, then apply optional thread_limit cap from CLI/ini.
+    let mut total_threads = max_threads_cpu.min(max_threads_ram);
+    if let Some(thread_limit) = opt.thread_limit {
+        if thread_limit > 0 {
+            total_threads = total_threads.min(thread_limit);
+        }
+    }
 
     logger.info(&format!(
-        "Resources: {} MB RAM (70% = {} MB for engines), max {} threads (CPU), max {} (RAM @ 128 MB/thread) → {} threads",
-        ram_mb, available_mem_mb, max_threads_cpu, max_threads_ram, total_threads
+        "Resources: {} MB RAM (70% = {} MB, engine budget = {} MB), max {} threads (CPU), max {} (RAM @ 128 MB/thread) → {} threads",
+        ram_mb, default_available_mem_mb, engine_mem_mb, max_threads_cpu, max_threads_ram, total_threads
     ));
 
-    let requested_cores = opt.cores
+    let requested_cores = opt
+        .cores
         .map(|c| c.number())
         .unwrap_or(NonZeroUsize::new(1).unwrap());
 
@@ -146,7 +162,7 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
         (requested_cores, dist)
     };
 
-    let per_thread_mb = (available_mem_mb / total_threads).max(128);
+    let per_thread_mb = (engine_mem_mb / total_threads).max(128);
     let hash_distribution: Vec<usize> = thread_distribution
         .iter()
         .map(|&t| per_thread_mb * t)

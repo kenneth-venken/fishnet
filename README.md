@@ -68,6 +68,34 @@ Watch a video introduction to MaxPV/fishnet:
 
 ## FAQ
 
+### Example `fishnet.ini` with resource limits
+
+You can fine‑tune how many threads and how much RAM fishnet may use by editing `fishnet.ini`
+in the current working directory. Example:
+
+```ini
+[Fishnet]
+Key = YOUR_KEY
+
+# Optional: override endpoint (for local/dev servers)
+Endpoint = http://localhost:8001
+
+# Optional: logical cores (threads) to use for engines.
+# Same semantics as the --cores/--threads flag: auto/all/number.
+Cores = auto
+
+# Optional: upper bound for total engine memory in MB.
+# This can only *reduce* the automatic 70% of physical RAM limit.
+# Example: with 16 GiB RAM → 70% ≈ 11468 MB.
+# - MemoryLimit = 2049 → engines get at most 2049 MB total
+# - MemoryLimit larger than 11468 → engines still get at most 11468 MB
+MemoryLimit = 2049
+
+# Optional: upper bound for total engine threads.
+# This can only *reduce* the automatically detected limit (CPU/RAM).
+ThreadLimit = 6
+```
+
 ### Which engine does fishnet use?
 
 fishnet uses [Stockfish](https://github.com/official-stockfish/Stockfish)
