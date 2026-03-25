@@ -286,7 +286,7 @@ impl QueueState {
                     match completed.work {
                         Work::Analysis { id, .. } => {
                             self.logger.info(&log);
-                            queue.api.submit_analysis(
+                            queue.api.submit_analysis_final(
                                 id,
                                 completed.flavor.eval_flavor(),
                                 completed.into_analysis(),
@@ -443,12 +443,60 @@ impl QueueActor {
             };
 
             if let Some(completed) = next {
-                if let Some(Acquired::Accepted(body)) = self
-                    .api
-                    .submit_move_and_acquire(completed.batch_id, completed.best_move)
-                    .await
-                {
-                    self.handle_acquired_response_body(body).await;
+                const MAX_ATTEMPTS: usize = 5;
+
+                let batch_id = completed.batch_id;
+                let best_move = completed.best_move;
+
+                for attempt in 0..MAX_ATTEMPTS {
+                    match self
+                        .api
+                        .submit_move_and_acquire(batch_id, best_move.clone())
+                        .await
+                    {
+                        Some(Acquired::Accepted(body)) => {
+                            self.handle_acquired_response_body(body).await;
+                            break;
+                        }
+                        Some(Acquired::NoContent) => {
+                            // Move was accepted, but server didn't provide next work.
+                            break;
+                        }
+                        None => {
+                            if attempt + 1 < MAX_ATTEMPTS {
+                                // Slightly increasing wait interval between retries.
+                                let wait = Duration::from_millis(250 * (attempt as u64 + 1))
+                                    .min(Duration::from_secs(5));
+                                self.logger.warn(&format!(
+                                    "Submit move failed (attempt {}/{MAX_ATTEMPTS}). Retrying in {wait:?}. Batch {batch_id}.",
+                                    attempt + 1
+                                ));
+                                sleep(wait).await;
+                            } else {
+                                self.logger.error(&format!(
+                                    "Submit move failed after {MAX_ATTEMPTS} attempts. Aborting batch {batch_id} and requesting new work."
+                                ));
+                                self.api.abort(batch_id);
+
+                                if let Some(Acquired::Accepted(body)) = self
+                                    .api
+                                    .acquire(AcquireQuery { slow: false })
+                                    .await
+                                {
+                                    self.handle_acquired_response_body(body).await;
+                                }
+                            }
+                        }
+                        Some(Acquired::Rejected) => {
+                            // Should not happen for submit_move_and_acquire today, but handle defensively.
+                            self.logger.error(&format!(
+                                "Server rejected move submission for batch {batch_id}. Stopping queue."
+                            ));
+                            let mut state = self.state.lock().await;
+                            state.shutdown_soon = true;
+                            break;
+                        }
+                    }
                 }
             } else {
                 break;

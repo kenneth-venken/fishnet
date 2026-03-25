@@ -65,6 +65,13 @@ enum ApiMessage {
         flavor: EvalFlavor,
         analysis: Vec<Option<AnalysisPart>>,
     },
+    /// Like `SubmitAnalysis` but on repeated failure we abort the batch so
+    /// the server doesn't wait for results forever.
+    SubmitAnalysisFinal {
+        batch_id: BatchId,
+        flavor: EvalFlavor,
+        analysis: Vec<Option<AnalysisPart>>,
+    },
     SubmitMove {
         batch_id: BatchId,
         best_move: Option<UciMove>,
@@ -344,10 +351,10 @@ pub enum Acquired {
 }
 
 #[derive(Debug, Serialize)]
-struct AnalysisRequestBody {
+struct AnalysisRequestBody<'a> {
     fishnet: Fishnet,
     stockfish: Stockfish,
-    analysis: Vec<Option<AnalysisPart>>,
+    analysis: &'a [Option<AnalysisPart>],
 }
 
 #[derive(Debug, Serialize)]
@@ -467,6 +474,21 @@ impl ApiStub {
     ) {
         self.tx
             .send(ApiMessage::SubmitAnalysis {
+                batch_id,
+                flavor,
+                analysis,
+            })
+            .expect("api actor alive");
+    }
+
+    pub fn submit_analysis_final(
+        &mut self,
+        batch_id: BatchId,
+        flavor: EvalFlavor,
+        analysis: Vec<Option<AnalysisPart>>,
+    ) {
+        self.tx
+            .send(ApiMessage::SubmitAnalysisFinal {
                 batch_id,
                 flavor,
                 analysis,
@@ -710,7 +732,7 @@ impl ApiActor {
                     .json(&AnalysisRequestBody {
                         fishnet: Fishnet::authenticated(self.key.clone()),
                         stockfish: Stockfish { flavor },
-                        analysis,
+                        analysis: &analysis,
                     })
                     .send()
                     .await?
@@ -721,6 +743,80 @@ impl ApiActor {
                         "Unexpected status for submitting analysis: {}",
                         res.status()
                     ));
+                }
+            }
+            ApiMessage::SubmitAnalysisFinal {
+                batch_id,
+                flavor,
+                analysis,
+            } => {
+                const MAX_ATTEMPTS: usize = 5;
+
+                let url = format!("{}/analysis/{}", self.endpoint, batch_id);
+                let mut last_err: Option<String> = None;
+
+                for attempt in 0..MAX_ATTEMPTS {
+                    let res = self
+                        .client
+                        .post(&url)
+                        .bearer_auth(self.key.as_ref().map_or("", |k| &k.0))
+                        .query(&SubmitQuery {
+                            stop: true,
+                            slow: false,
+                        })
+                        .json(&AnalysisRequestBody {
+                            fishnet: Fishnet::authenticated(self.key.clone()),
+                            stockfish: Stockfish { flavor },
+                            analysis: &analysis,
+                        })
+                        .send()
+                        .await;
+
+                    match res {
+                        Ok(res) => match res.error_for_status() {
+                            Ok(res) => {
+                                if res.status() != StatusCode::NO_CONTENT {
+                                    self.logger.warn(&format!(
+                                        "Unexpected status for submitting final analysis: {}",
+                                        res.status()
+                                    ));
+                                }
+                                last_err = None;
+                                break;
+                            }
+                            Err(err) => {
+                                last_err = Some(error_report(&err));
+                            }
+                        },
+                        Err(err) => {
+                            last_err = Some(error_report(&err));
+                        }
+                    }
+
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        // Slightly increasing wait interval between retries.
+                        let wait_ms = 250u64 * (attempt as u64 + 1);
+                        let wait = Duration::from_millis(wait_ms).min(Duration::from_secs(5));
+                        self.logger.warn(&format!(
+                            "Submitting final analysis failed (attempt {}/{MAX_ATTEMPTS}). Retrying in {wait:?}. Last error: {}",
+                            attempt + 1,
+                            last_err.as_deref().unwrap_or("?")
+                        ));
+                        sleep(wait).await;
+                    }
+                }
+
+                if last_err.is_some() {
+                    self.logger.error(&format!(
+                        "Submitting final analysis failed after {MAX_ATTEMPTS} attempts. Aborting batch {batch_id}. Last error: {}",
+                        last_err.as_deref().unwrap_or("?")
+                    ));
+                    if let Err(err) = self.abort(batch_id).await {
+                        self.logger.warn(&format!(
+                            "Abort failed after submit_analysis_final failure for {batch_id}: {}",
+                            error_report(&err)
+                        ));
+                    }
                 }
             }
             ApiMessage::SubmitMove {
