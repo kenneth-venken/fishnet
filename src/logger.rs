@@ -30,12 +30,17 @@ impl Logger {
             verbose,
             stderr,
             terminal: io::stdout().is_terminal(),
-            state: Arc::new(Mutex::new(LoggerState { progress_line: 0 })),
+            state: Arc::new(Mutex::new(LoggerState {
+                progress_line: 0,
+                last_fishnet_line: None,
+                fishnet_mid_line: false,
+            })),
         }
     }
 
     fn println(&self, line: &str) {
         let mut state = self.state.lock().expect("logger state");
+        state.end_fishnet_dot_run_if_needed(self.stderr);
         state.line_feed();
 
         if self.stderr {
@@ -50,6 +55,7 @@ impl Logger {
 
     pub fn clear_echo(&self) {
         let mut state = self.state.lock().expect("logger state");
+        state.end_fishnet_dot_run_if_needed(self.stderr);
         state.line_feed();
     }
 
@@ -67,8 +73,36 @@ impl Logger {
         self.println(line);
     }
 
+    /// Repeated identical summaries print as `.` on one line (flush each time).
     pub fn fishnet_info(&self, line: &str) {
-        self.println(&format!("><> {line}"));
+        let mut state = self.state.lock().expect("logger state");
+        let is_repeat = state
+            .last_fishnet_line
+            .as_deref()
+            .is_some_and(|prev| prev == line);
+        if is_repeat {
+            if self.stderr {
+                write!(io::stderr(), ".").nevermind("log");
+                io::stderr().flush().nevermind("flush");
+            } else {
+                write!(io::stdout(), ".").nevermind("log");
+                io::stdout().flush().nevermind("flush");
+            }
+            state.fishnet_mid_line = true;
+            return;
+        }
+
+        state.end_fishnet_dot_run_if_needed(self.stderr);
+        state.line_feed();
+        let out = format!("><> {line}");
+        if self.stderr {
+            writeln!(io::stderr(), "{out}").nevermind("log to stderr");
+        } else if let Err(e) = writeln!(io::stdout(), "{out}") {
+            writeln!(io::stderr(), "E: {e} while logging to stdout: {out}")
+                .nevermind("log to stderr");
+        }
+        state.last_fishnet_line = Some(line.to_owned());
+        state.fishnet_mid_line = false;
     }
 
     pub fn warn(&self, line: &str) {
@@ -92,6 +126,7 @@ impl Logger {
         );
         if self.terminal {
             let mut state = self.state.lock().expect("logger state");
+            state.end_fishnet_dot_run_if_needed(self.stderr);
             print!(
                 "\r{}{}",
                 line,
@@ -161,9 +196,30 @@ impl From<&PositionResponse> for ProgressAt {
 
 struct LoggerState {
     pub progress_line: usize,
+    /// Payload passed to `fishnet_info` (without `><> ` prefix) for deduplication.
+    last_fishnet_line: Option<String>,
+    /// After printing `.` for a repeated fishnet line, stdout has no trailing newline yet.
+    fishnet_mid_line: bool,
 }
 
 impl LoggerState {
+    fn end_fishnet_dot_run_if_needed(&mut self, stderr: bool) {
+        if !self.fishnet_mid_line {
+            return;
+        }
+        self.fishnet_mid_line = false;
+        if stderr {
+            writeln!(io::stderr()).nevermind("log");
+        } else {
+            writeln!(io::stdout()).nevermind("log");
+        }
+        if !stderr {
+            io::stdout().flush().nevermind("flush");
+        } else {
+            io::stderr().flush().nevermind("flush");
+        }
+    }
+
     fn line_feed(&mut self) {
         if self.progress_line > 0 {
             self.progress_line = 0;
