@@ -10,6 +10,15 @@ use crate::{
     util::grow_with_and_get_mut,
 };
 
+/// Main-PV depth milestone from the Stockfish UCI loop (for server work-progress).
+#[derive(Debug, Clone)]
+pub struct EngineProgress {
+    pub batch_id: BatchId,
+    pub depth: u8,
+    pub nodes: u64,
+    pub nps: Option<u32>,
+}
+
 #[derive(Debug)]
 pub struct Chunk {
     pub work: Work,

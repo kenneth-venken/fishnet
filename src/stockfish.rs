@@ -10,12 +10,18 @@ use tokio::{
 use crate::{
     api::{Score, Work},
     assets::{EngineFlavor, EvalFlavor},
-    ipc::{Chunk, ChunkFailed, Matrix, Position, PositionResponse},
+    ipc::{Chunk, ChunkFailed, EngineProgress, Matrix, Position, PositionResponse},
     logger::{Logger, ProgressAt},
     util::NevermindExt as _,
 };
 
-pub fn channel(mut exe: PathBuf, logger: Logger, threads: usize, hash_mb: usize) -> (StockfishStub, StockfishActor) {
+pub fn channel(
+    mut exe: PathBuf,
+    logger: Logger,
+    threads: usize,
+    hash_mb: usize,
+    progress_tx: mpsc::Sender<EngineProgress>,
+) -> (StockfishStub, StockfishActor) {
     // 1. Highest priority: env var
     if let Ok(path) = env::var("STOCKFISH_PATH") {
         exe = PathBuf::from(path);
@@ -61,6 +67,7 @@ pub fn channel(mut exe: PathBuf, logger: Logger, threads: usize, hash_mb: usize)
             logger,
             threads,
             hash_mb,
+            progress_tx,
         },
     )
 }
@@ -91,6 +98,7 @@ pub struct StockfishActor {
     logger: Logger,
     threads: usize,
     hash_mb: usize,
+    progress_tx: mpsc::Sender<EngineProgress>,
 }
 
 #[derive(Debug)]
@@ -508,6 +516,14 @@ impl StockfishActor {
                                 time.unwrap_or(latest_time),
                                 nps.or(latest_nps),
                             ));
+                            if matches!(position.work, Work::Analysis { .. }) {
+                                let _ = self.progress_tx.try_send(EngineProgress {
+                                    batch_id: position.work.id(),
+                                    depth,
+                                    nodes: nodes.unwrap_or(latest_nodes),
+                                    nps: nps.or(latest_nps),
+                                });
+                            }
                         }
                         latest_depth = depth;
                     }

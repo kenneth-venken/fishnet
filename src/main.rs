@@ -36,7 +36,7 @@ use tokio::{
 use crate::{
     assets::{Assets, ByEngineFlavor, Cpu, EngineFlavor},
     configure::{Command, CpuPriority, Opt},
-    ipc::{Chunk, ChunkFailed, Pull},
+    ipc::{Chunk, ChunkFailed, EngineProgress, Pull},
     logger::{Logger, ProgressAt},
     update::{UpdateSuccess, auto_update},
     util::{RandomizedBackoff, dot_thousands},
@@ -205,7 +205,7 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
     logger.headline(&format!("Running ({to_stop} to stop) ..."));
 
     // Spawn queue actor.
-    let (mut queue, queue_actor) = queue::channel(
+    let (mut queue, queue_actor, progress_tx) = queue::channel(
         opt.stats,
         opt.backlog,
         cores,
@@ -226,7 +226,16 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
             let logger = logger.clone();
             let threads = thread_distribution[i];
             let hash_mb = hash_distribution[i];
-            join_set.spawn(worker(i, assets, tx, logger, threads, hash_mb));
+            let progress_tx = progress_tx.clone();
+            join_set.spawn(worker(
+                i,
+                assets,
+                tx,
+                logger,
+                threads,
+                hash_mb,
+                progress_tx,
+            ));
         }
         rx
     };
@@ -350,6 +359,7 @@ async fn worker(
     logger: Logger,
     threads: usize,
     hash_mb: usize,
+    progress_tx: mpsc::Sender<EngineProgress>,
 ) {
     logger.debug(&format!("Started worker {i}."));
 
@@ -392,6 +402,7 @@ async fn worker(
                     logger.clone(),
                     threads,
                     hash_mb,
+                    progress_tx.clone(),
                 );
                 let join_handle = tokio::spawn(sf_actor.run());
                 (sf, join_handle)
@@ -552,6 +563,18 @@ fn set_current_process_min_priority() -> windows::core::Result<()> {
 }
 
 fn configure_client() -> Client {
+    let http_timeout = env::var("FISHNET_HTTP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
+
+    let http_connect_timeout = env::var("FISHNET_HTTP_CONNECT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(10));
+
     // Build TLS backend that supports SSLKEYLOGFILE.
     let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
@@ -575,7 +598,8 @@ fn configure_client() -> Client {
             env::consts::ARCH,
             env!("CARGO_PKG_VERSION")
         ))
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(http_connect_timeout)
+        .timeout(http_timeout)
         .pool_idle_timeout(Duration::from_secs(25))
         .use_preconfigured_tls(tls)
         .build()

@@ -77,6 +77,14 @@ enum ApiMessage {
         best_move: Option<UciMove>,
         callback: oneshot::Sender<Acquired>,
     },
+    WorkProgress {
+        batch_id: BatchId,
+        depth: u8,
+        nodes: u64,
+        nps: u64,
+        processing_time_ms: u64,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +130,21 @@ impl Fishnet {
             apikey: key.map_or("".to_owned(), |k| k.0),
         }
     }
+}
+
+/// API key only (MaxPV work-progress endpoint; no `version` field).
+#[derive(Debug, Serialize)]
+struct WorkProgressFishnet {
+    apikey: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkProgressRequestBody {
+    fishnet: WorkProgressFishnet,
+    depth: u8,
+    nodes: u64,
+    nps: u64,
+    processing_time_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -511,6 +534,33 @@ impl ApiStub {
             .expect("api actor alive");
         res.await.ok()
     }
+
+    /// POST `/work-progress/{batch_id}` (no Bearer). Returns `true` on HTTP 200.
+    pub async fn submit_work_progress(
+        &mut self,
+        batch_id: BatchId,
+        depth: u8,
+        nodes: u64,
+        nps: u64,
+        processing_time_ms: u64,
+    ) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ApiMessage::WorkProgress {
+                batch_id,
+                depth,
+                nodes,
+                nps,
+                processing_time_ms,
+                reply,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
 }
 
 pub struct ApiActor {
@@ -857,6 +907,73 @@ impl ApiActor {
                         ));
                         res.error_for_status()?;
                     }
+                }
+            }
+            ApiMessage::WorkProgress {
+                batch_id,
+                depth,
+                nodes,
+                nps,
+                processing_time_ms,
+                reply,
+            } => {
+                let key = match &self.key {
+                    Some(k) => k.0.clone(),
+                    None => {
+                        reply.send(false).nevermind("callback dropped");
+                        return Ok(());
+                    }
+                };
+
+                let url = format!("{}/work-progress/{}", self.endpoint, batch_id);
+                let res = match self
+                    .client
+                    .post(&url)
+                    .json(&WorkProgressRequestBody {
+                        fishnet: WorkProgressFishnet { apikey: key },
+                        depth,
+                        nodes,
+                        nps,
+                        processing_time_ms,
+                    })
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(err) => {
+                        self.logger.debug(&format!(
+                            "work-progress send failed for {batch_id}: {}",
+                            error_report(&err)
+                        ));
+                        reply.send(false).nevermind("callback dropped");
+                        return Ok(());
+                    }
+                };
+
+                let status = res.status();
+                let ok = status == StatusCode::OK;
+                if ok {
+                    reply.send(true).nevermind("callback dropped");
+                } else {
+                    let body_hint = res.text().await.unwrap_or_default();
+                    match status {
+                        StatusCode::BAD_REQUEST
+                        | StatusCode::NOT_FOUND
+                        | StatusCode::BAD_GATEWAY
+                        | StatusCode::SERVICE_UNAVAILABLE => {
+                            self.logger.debug(&format!(
+                                "work-progress {batch_id} -> {status}: {}",
+                                body_hint.chars().take(200).collect::<String>()
+                            ));
+                        }
+                        _ => {
+                            self.logger.warn(&format!(
+                                "work-progress {batch_id} unexpected {status}: {}",
+                                body_hint.chars().take(200).collect::<String>()
+                            ));
+                        }
+                    }
+                    reply.send(false).nevermind("callback dropped");
                 }
             }
         }

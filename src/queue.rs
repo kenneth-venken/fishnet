@@ -17,7 +17,7 @@ use shakmaty::{
 };
 use tokio::{
     sync::{Mutex, Notify, mpsc, oneshot},
-    time::{Instant, sleep},
+    time::{Instant, sleep, sleep_until},
 };
 use url::Url;
 
@@ -28,11 +28,166 @@ use crate::{
     },
     assets::{EngineFlavor, EvalFlavor},
     configure::{BacklogOpt, Endpoint, MaxBackoff, StatsOpt},
-    ipc::{Chunk, ChunkFailed, Position, PositionResponse, Pull},
+    ipc::{Chunk, ChunkFailed, EngineProgress, Position, PositionResponse, Pull},
     logger::{Logger, ProgressAt, QueueStatusBar, short_variant_name},
     stats::{NpsRecorder, Stats, StatsRecorder},
     util::{NevermindExt as _, RandomizedBackoff, grow_with_and_get_mut},
 };
+
+const WORK_PROGRESS_DEBOUNCE: Duration = Duration::from_secs(10);
+const WORK_PROGRESS_THROTTLE: Duration = Duration::from_secs(60);
+const WORK_PROGRESS_RETRY_AFTER_FAIL: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone)]
+struct WorkProgressCandidate {
+    depth: u8,
+    nodes: u64,
+    nps: Option<u32>,
+}
+
+fn work_progress_next_sleep(
+    pending: &HashMap<BatchId, PendingBatch>,
+    now: Instant,
+) -> Option<Instant> {
+    let mut min_wake: Option<Instant> = None;
+    for p in pending.values() {
+        if !matches!(p.work, Work::Analysis { .. }) {
+            continue;
+        }
+        if p.wp_candidate.is_none() {
+            continue;
+        }
+        let quiet = p.wp_quiet_until?;
+        if now < quiet {
+            min_wake = Some(min_wake.map_or(quiet, |m| m.min(quiet)));
+            continue;
+        }
+        if p.wp_in_flight {
+            continue;
+        }
+        let throttle_ok = p
+            .wp_last_ok
+            .map(|t| now.duration_since(t) >= WORK_PROGRESS_THROTTLE)
+            .unwrap_or(true);
+        if throttle_ok {
+            min_wake = Some(min_wake.map_or(now, |m| m.min(now)));
+        } else {
+            let wake = p.wp_last_ok.expect("last ok when throttled") + WORK_PROGRESS_THROTTLE;
+            if wake > now {
+                min_wake = Some(min_wake.map_or(wake, |m| m.min(wake)));
+            } else {
+                min_wake = Some(min_wake.map_or(now, |m| m.min(now)));
+            }
+        }
+    }
+    min_wake
+}
+
+async fn try_send_ready_work_progress(
+    state: &Arc<Mutex<QueueState>>,
+    api: &mut ApiStub,
+    logger: &Logger,
+) {
+    let now = Instant::now();
+    let jobs: Vec<(BatchId, u8, u64, u64, u64)> = {
+        let mut s = state.lock().await;
+        let mut out = Vec::new();
+        for (id, p) in s.pending.iter_mut() {
+            if !matches!(p.work, Work::Analysis { .. }) {
+                continue;
+            }
+            if p.wp_in_flight {
+                continue;
+            }
+            let Some(ref c) = p.wp_candidate else {
+                continue;
+            };
+            let Some(quiet) = p.wp_quiet_until else {
+                continue;
+            };
+            if now < quiet {
+                continue;
+            }
+            let throttle_ok = p
+                .wp_last_ok
+                .map(|t| now.duration_since(t) >= WORK_PROGRESS_THROTTLE)
+                .unwrap_or(true);
+            if !throttle_ok {
+                continue;
+            }
+            p.wp_in_flight = true;
+            let ms = now
+                .checked_duration_since(p.analysis_started)
+                .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or(0);
+            let nps_u64 = u64::from(c.nps.unwrap_or(0));
+            out.push((*id, c.depth, c.nodes, nps_u64, ms));
+        }
+        out
+    };
+    for (batch_id, depth, nodes, nps, ms) in jobs {
+        let ok = api
+            .submit_work_progress(batch_id, depth, nodes, nps, ms)
+            .await;
+        let mut s = state.lock().await;
+        if let Some(p) = s.pending.get_mut(&batch_id) {
+            p.wp_in_flight = false;
+            if ok {
+                p.wp_last_ok = Some(Instant::now());
+                p.wp_candidate = None;
+                p.wp_quiet_until = None;
+            } else {
+                p.wp_quiet_until = Some(Instant::now() + WORK_PROGRESS_RETRY_AFTER_FAIL);
+            }
+        }
+        if ok {
+            logger.debug(&format!("work-progress ok for {batch_id}"));
+        }
+    }
+}
+
+async fn work_progress_loop(
+    state: Arc<Mutex<QueueState>>,
+    mut progress_rx: mpsc::Receiver<EngineProgress>,
+    mut api: ApiStub,
+    logger: Logger,
+) {
+    loop {
+        try_send_ready_work_progress(&state, &mut api, &logger).await;
+        let next = {
+            let s = state.lock().await;
+            work_progress_next_sleep(&s.pending, Instant::now())
+        };
+        tokio::select! {
+            ev = progress_rx.recv() => {
+                match ev {
+                    None => break,
+                    Some(ev) => {
+                        let mut s = state.lock().await;
+                        if let Some(p) = s.pending.get_mut(&ev.batch_id) {
+                            if matches!(p.work, Work::Analysis { .. }) {
+                                p.wp_candidate = Some(WorkProgressCandidate {
+                                    depth: ev.depth,
+                                    nodes: ev.nodes,
+                                    nps: ev.nps,
+                                });
+                                p.wp_quiet_until =
+                                    Some(Instant::now() + WORK_PROGRESS_DEBOUNCE);
+                            }
+                        }
+                    }
+                }
+            }
+            _ = async {
+                if let Some(deadline) = next {
+                    sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await
+                }
+            }, if next.is_some() => {}
+        }
+    }
+}
 
 pub fn channel(
     stats_opt: StatsOpt,
@@ -41,7 +196,8 @@ pub fn channel(
     api: ApiStub,
     max_backoff: MaxBackoff,
     logger: Logger,
-) -> (QueueStub, QueueActor) {
+) -> (QueueStub, QueueActor, mpsc::Sender<EngineProgress>) {
+    let (progress_tx, progress_rx) = mpsc::channel::<EngineProgress>(256);
     let (tx, rx) = mpsc::unbounded_channel();
     let interrupt = Arc::new(Notify::new());
     let state = Arc::new(Mutex::new(QueueState::new(
@@ -63,8 +219,9 @@ pub fn channel(
         backlog_opt,
         logger,
         backoff: RandomizedBackoff::new(max_backoff),
+        progress_rx: Some(progress_rx),
     };
-    (stub, actor)
+    (stub, actor, progress_tx)
 }
 
 #[derive(Clone)]
@@ -181,6 +338,11 @@ impl QueueState {
                     positions,
                     total_nodes: 0,
                     total_cpu_time: Duration::ZERO,
+                    analysis_started: Instant::now(),
+                    wp_candidate: None,
+                    wp_quiet_until: None,
+                    wp_last_ok: None,
+                    wp_in_flight: false,
                 });
 
                 self.logger.progress(self.status_bar(), progress_at);
@@ -339,11 +501,18 @@ pub struct QueueActor {
     backlog_opt: BacklogOpt,
     backoff: RandomizedBackoff,
     logger: Logger,
+    progress_rx: Option<mpsc::Receiver<EngineProgress>>,
 }
 
 impl QueueActor {
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         self.logger.debug("Queue actor started");
+        if let Some(progress_rx) = self.progress_rx.take() {
+            let state = self.state.clone();
+            let api = self.api.clone();
+            let logger = self.logger.clone();
+            tokio::spawn(work_progress_loop(state, progress_rx, api, logger));
+        }
         self.run_inner().await;
     }
 
@@ -808,6 +977,11 @@ struct PendingBatch {
     positions: Vec<Option<Skip<PositionResponse>>>,
     total_nodes: u64,
     total_cpu_time: Duration,
+    analysis_started: Instant,
+    wp_candidate: Option<WorkProgressCandidate>,
+    wp_quiet_until: Option<Instant>,
+    wp_last_ok: Option<Instant>,
+    wp_in_flight: bool,
 }
 
 impl PendingBatch {
