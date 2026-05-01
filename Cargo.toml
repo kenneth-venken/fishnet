@@ -1,6 +1,6 @@
 [package]
 name = "fishnet"
-version = "2.13.2-maxpv"
+version = "2.14.0-maxpv"
 description = "Distributed Stockfish analysis for maxpv.org"
 repository = "https://github.com/lichess-org/fishnet"
 readme = "README.md"
