@@ -329,7 +329,12 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
     // Shutdown queue to abort remaining chunks.
     queue.shutdown().await;
 
-    // Wait for all workers.
+    // Drop the last progress sender so work-progress and workers can finish.
+    // Keeping it alive deadlocks shutdown: work_progress_loop holds an ApiStub,
+    // join_set waits for the API actor, and the API actor waits for that stub.
+    drop(progress_tx);
+
+    // Wait for workers, queue actor, API actor, and engine tasks.
     while let Some(res) = join_set.join_next().await {
         res.expect("join");
     }

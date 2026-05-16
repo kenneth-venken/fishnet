@@ -151,6 +151,7 @@ async fn work_progress_loop(
     mut progress_rx: mpsc::Receiver<EngineProgress>,
     mut api: ApiStub,
     logger: Logger,
+    interrupt: Arc<Notify>,
 ) {
     loop {
         try_send_ready_work_progress(&state, &mut api, &logger).await;
@@ -159,6 +160,7 @@ async fn work_progress_loop(
             work_progress_next_sleep(&s.pending, Instant::now())
         };
         tokio::select! {
+            _ = interrupt.notified() => break,
             ev = progress_rx.recv() => {
                 match ev {
                     None => break,
@@ -210,6 +212,7 @@ pub fn channel(
         interrupt: interrupt.clone(),
         state: state.clone(),
         api: api.clone(),
+        progress_tx: Some(progress_tx.clone()),
     };
     let actor = QueueActor {
         rx,
@@ -230,6 +233,7 @@ pub struct QueueStub {
     interrupt: Arc<Notify>,
     state: Arc<Mutex<QueueState>>,
     api: ApiStub,
+    progress_tx: Option<mpsc::Sender<EngineProgress>>,
 }
 
 impl QueueStub {
@@ -258,7 +262,8 @@ impl QueueStub {
         let mut state = self.state.lock().await;
         state.shutdown_soon = true;
         self.tx.take();
-        self.interrupt.notify_one();
+        self.progress_tx.take();
+        self.interrupt.notify_waiters();
     }
 
     pub async fn shutdown(mut self) {
@@ -507,13 +512,22 @@ pub struct QueueActor {
 impl QueueActor {
     pub async fn run(mut self) {
         self.logger.debug("Queue actor started");
-        if let Some(progress_rx) = self.progress_rx.take() {
+        let work_progress = if let Some(progress_rx) = self.progress_rx.take() {
             let state = self.state.clone();
             let api = self.api.clone();
             let logger = self.logger.clone();
-            tokio::spawn(work_progress_loop(state, progress_rx, api, logger));
-        }
+            let interrupt = self.interrupt.clone();
+            Some(tokio::spawn(work_progress_loop(
+                state, progress_rx, api, logger, interrupt,
+            )))
+        } else {
+            None
+        };
         self.run_inner().await;
+        if let Some(work_progress) = work_progress {
+            work_progress.abort();
+            let _ = work_progress.await;
+        }
     }
 
     pub async fn backlog_wait_time(&mut self) -> (Duration, AcquireQuery) {
