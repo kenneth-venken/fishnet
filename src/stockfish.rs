@@ -5,6 +5,7 @@ use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, BufWriter, Lines},
     process::{ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot},
+    time::timeout,
 };
 
 use crate::{
@@ -15,13 +16,10 @@ use crate::{
     util::NevermindExt as _,
 };
 
-pub fn channel(
-    mut exe: PathBuf,
-    logger: Logger,
-    threads: usize,
-    hash_mb: usize,
-    progress_tx: mpsc::Sender<EngineProgress>,
-) -> (StockfishStub, StockfishActor) {
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Resolve the engine binary path (STOCKFISH_PATH → fishnet.ini → CWD → canonicalize).
+pub fn resolve_exe(mut exe: PathBuf, logger: &Logger) -> PathBuf {
     // 1. Highest priority: env var
     if let Ok(path) = env::var("STOCKFISH_PATH") {
         exe = PathBuf::from(path);
@@ -45,17 +43,114 @@ pub fn channel(
     }
     // 3. Fallback: CWD
     else if let Some(name) = exe.file_name() {
-         let cwd_path = std::env::current_dir().unwrap_or_default().join(name);
-         if cwd_path.exists() {
-             exe = cwd_path;
-             logger.info(&format!("Using engine from CWD: {}", exe.display()));
-         }
-     }
+        let cwd_path = std::env::current_dir().unwrap_or_default().join(name);
+        if cwd_path.exists() {
+            exe = cwd_path;
+            logger.info(&format!("Using engine from CWD: {}", exe.display()));
+        }
+    }
 
-     // Make absolute path (safer for spawn)
-     if let Ok(abs) = exe.canonicalize() {
-         exe = abs;
-     }
+    // Make absolute path (safer for spawn)
+    if let Ok(abs) = exe.canonicalize() {
+        exe = abs;
+    }
+
+    exe
+}
+
+/// Parse a UCI `id name ...` line into the engine name string.
+pub fn parse_id_name(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("id name ")?.trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// Spawn Official Stockfish briefly, send `uci`, and return the `id name` string.
+pub async fn probe_official_version(exe: PathBuf, logger: &Logger) -> Option<String> {
+    let exe = resolve_exe(exe, logger);
+    match timeout(VERSION_PROBE_TIMEOUT, probe_official_version_inner(&exe, logger)).await {
+        Ok(Ok(version)) => {
+            logger.info(&format!("Official Stockfish version: {version}"));
+            Some(version)
+        }
+        Ok(Err(err)) => {
+            logger.warn(&format!(
+                "Could not probe Official Stockfish version ({}): {err}. Continuing without version.",
+                exe.display()
+            ));
+            None
+        }
+        Err(_) => {
+            logger.warn(&format!(
+                "Timed out probing Official Stockfish version ({}). Continuing without version.",
+                exe.display()
+            ));
+            None
+        }
+    }
+}
+
+async fn probe_official_version_inner(exe: &PathBuf, logger: &Logger) -> io::Result<String> {
+    let mut child = new_process_group(&mut Command::new(exe))
+        .current_dir(
+            exe.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        )
+        .stdout(Stdio::piped())
+        .stdin(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let mut stdout = Stdout::new(
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdout closed"))?,
+    );
+    let mut stdin = Stdin::new(
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin closed"))?,
+    );
+
+    stdin.write_line("uci").await?;
+    stdin.flush().await?;
+
+    let mut version = None;
+    loop {
+        let line = stdout.read_line().await?;
+        let line = line.trim_end();
+        if let Some(name) = parse_id_name(line) {
+            version = Some(name.to_owned());
+        } else if line == "uciok" {
+            break;
+        } else {
+            logger.debug(&format!("Version probe: {line}"));
+        }
+    }
+
+    let _ = stdin.write_line("quit").await;
+    let _ = stdin.flush().await;
+    let _ = child.wait().await;
+
+    version.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "engine did not send id name")
+    })
+}
+
+pub fn channel(
+    exe: PathBuf,
+    logger: Logger,
+    threads: usize,
+    hash_mb: usize,
+    progress_tx: mpsc::Sender<EngineProgress>,
+) -> (StockfishStub, StockfishActor) {
+    let exe = resolve_exe(exe, &logger);
 
     let (tx, rx) = mpsc::channel(1);
     (
@@ -689,5 +784,35 @@ impl FromStr for UciLine {
                 ));
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_id_name_release() {
+        assert_eq!(
+            parse_id_name("id name Stockfish 17.1"),
+            Some("Stockfish 17.1")
+        );
+        assert_eq!(parse_id_name("id name Stockfish 16"), Some("Stockfish 16"));
+    }
+
+    #[test]
+    fn parse_id_name_dev() {
+        assert_eq!(
+            parse_id_name("id name Stockfish dev-20260301-abcdef"),
+            Some("Stockfish dev-20260301-abcdef")
+        );
+    }
+
+    #[test]
+    fn parse_id_name_missing_or_empty() {
+        assert_eq!(parse_id_name("id author the Stockfish developers"), None);
+        assert_eq!(parse_id_name("uciok"), None);
+        assert_eq!(parse_id_name("id name "), None);
+        assert_eq!(parse_id_name("id name"), None);
     }
 }

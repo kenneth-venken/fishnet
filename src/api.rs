@@ -28,6 +28,7 @@ pub fn channel(
     key: Option<Key>,
     client: Client,
     logger: Logger,
+    official_version: Option<String>,
 ) -> (ApiStub, ApiActor) {
     let (tx, rx) = mpsc::unbounded_channel();
     (
@@ -35,12 +36,12 @@ pub fn channel(
             tx,
             endpoint: endpoint.clone(),
         },
-        ApiActor::new(rx, endpoint, key, client, logger),
+        ApiActor::new(rx, endpoint, key, client, logger, official_version),
     )
 }
 
 pub fn spawn(endpoint: Endpoint, key: Option<Key>, client: Client, logger: Logger) -> ApiStub {
-    let (stub, actor) = channel(endpoint, key, client, logger);
+    let (stub, actor) = channel(endpoint, key, client, logger, None);
     tokio::spawn(actor.run());
     stub
 }
@@ -118,6 +119,12 @@ pub struct VoidRequestBody {
 }
 
 #[derive(Debug, Serialize)]
+struct AcquireRequestBody {
+    fishnet: Fishnet,
+    stockfish: Stockfish,
+}
+
+#[derive(Debug, Serialize)]
 struct Fishnet {
     version: &'static str,
     apikey: String,
@@ -150,6 +157,8 @@ struct WorkProgressRequestBody {
 #[derive(Debug, Serialize)]
 struct Stockfish {
     flavor: EvalFlavor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -383,6 +392,7 @@ struct AnalysisRequestBody<'a> {
 #[derive(Debug, Serialize)]
 struct MoveRequestBody {
     fishnet: Fishnet,
+    stockfish: Stockfish,
     #[serde(rename = "move")]
     m: BestMove,
 }
@@ -570,6 +580,7 @@ pub struct ApiActor {
     client: Client,
     error_backoff: RandomizedBackoff,
     logger: Logger,
+    official_version: Option<String>,
 }
 
 impl ApiActor {
@@ -579,6 +590,7 @@ impl ApiActor {
         key: Option<Key>,
         client: Client,
         logger: Logger,
+        official_version: Option<String>,
     ) -> ApiActor {
         ApiActor {
             rx,
@@ -587,7 +599,23 @@ impl ApiActor {
             key,
             error_backoff: RandomizedBackoff::default(),
             logger,
+            official_version,
         }
+    }
+
+    fn stockfish_for(&self, flavor: EvalFlavor) -> Stockfish {
+        Stockfish {
+            flavor,
+            version: if flavor.is_nnue() {
+                self.official_version.clone()
+            } else {
+                None
+            },
+        }
+    }
+
+    fn official_stockfish(&self) -> Stockfish {
+        self.stockfish_for(EvalFlavor::Nnue)
     }
 
     pub async fn run(mut self) {
@@ -728,8 +756,9 @@ impl ApiActor {
                     .post(&url)
                     .bearer_auth(self.key.as_ref().map_or("", |k| &k.0))
                     .query(&query)
-                    .json(&VoidRequestBody {
+                    .json(&AcquireRequestBody {
                         fishnet: Fishnet::authenticated(self.key.clone()),
+                        stockfish: self.official_stockfish(),
                     })
                     .send()
                     .await?;
@@ -781,7 +810,7 @@ impl ApiActor {
                     })
                     .json(&AnalysisRequestBody {
                         fishnet: Fishnet::authenticated(self.key.clone()),
-                        stockfish: Stockfish { flavor },
+                        stockfish: self.stockfish_for(flavor),
                         analysis: &analysis,
                     })
                     .send()
@@ -816,7 +845,7 @@ impl ApiActor {
                         })
                         .json(&AnalysisRequestBody {
                             fishnet: Fishnet::authenticated(self.key.clone()),
-                            stockfish: Stockfish { flavor },
+                            stockfish: self.stockfish_for(flavor),
                             analysis: &analysis,
                         })
                         .send()
@@ -881,6 +910,7 @@ impl ApiActor {
                     .bearer_auth(self.key.as_ref().map_or("", |k| &k.0))
                     .json(&MoveRequestBody {
                         fishnet: Fishnet::authenticated(self.key.clone()),
+                        stockfish: self.official_stockfish(),
                         m: BestMove { best_move },
                     })
                     .send()

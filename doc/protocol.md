@@ -11,6 +11,10 @@ POST https://maxpv.org/fishnet/acquire
   "fishnet": {
     "version": "2.3.4",
     "apikey": "XXX"
+  },
+  "stockfish": {
+    "flavor": "nnue",
+    "version": "Stockfish 17.1" // UCI id name; optional if probe failed
   }
 }
 ```
@@ -69,7 +73,8 @@ POST https://maxpv.org/fishnet/analysis/{work_id}
     "apikey": "XXX"
   },
   "stockfish": {
-    "flavor": "nnue" // or classical
+    "flavor": "nnue", // or classical
+    "version": "Stockfish 17.1" // Official Stockfish only; omitted for classical / Fairy-Stockfish
   },
   "analysis": [
     { // first ply
@@ -115,6 +120,10 @@ POST https://maxpv.org/fishnet/move/{work_id}
   "fishnet": {
     "version": "2.3.4",
     "apikey": "XXX"
+  },
+  "stockfish": {
+    "flavor": "nnue",
+    "version": "Stockfish 17.1" // so next job can be filtered by engine version
   },
   "move": {
     "bestmove": "b7b8q"
@@ -242,3 +251,5 @@ future versions of the server might start using them.
   - 401 Unauthorized (Unknown key)
   - 403 Forbidden (Key disabled)
   - 406 Not Acceptable (Update required)
+- Optional `stockfish.version` (UCI `id name`) on acquire, analysis submit,
+  and move submit, so the server can filter work by Official Stockfish version.

@@ -106,6 +106,9 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
         )
     ));
 
+    let official_version =
+        stockfish::probe_official_version(assets.stockfish.official.path.clone(), logger).await;
+
     // Max threads from CPU: reserve 2 for OS.
     let max_threads_cpu: usize = thread::available_parallelism()
         .map(|n| (n.get().saturating_sub(2)).max(1))
@@ -194,7 +197,13 @@ async fn run(opt: Opt, client: &Client, logger: &Logger) {
     let mut join_set = JoinSet::new();
 
     // Spawn API actor.
-    let (api, api_actor) = api::channel(endpoint.clone(), opt.key, client.clone(), logger.clone());
+    let (api, api_actor) = api::channel(
+        endpoint.clone(),
+        opt.key,
+        client.clone(),
+        logger.clone(),
+        official_version,
+    );
     join_set.spawn(api_actor.run());
 
     let to_stop = if io::stdout().is_terminal() {
