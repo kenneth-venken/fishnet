@@ -432,33 +432,50 @@ impl Target {
             );
         }
 
-        assert!(
+        // GCC 14+ treats inconsistent PGO *value* profiles as a hard error
+        // (stringops counter off-by-one under LTO), which Fairy-Stockfish hits
+        // on MinGW. Skip value profiling; keep edge-profile PGO.
+        let cxxflags = format!(
+            "{} -DNNUE_EMBEDDING_OFF{}",
+            env::var("CXXFLAGS").unwrap_or_default(),
+            if pgo {
+                " -fprofile-correction -fno-profile-values"
+            } else {
+                ""
+            }
+        );
+
+        let run_make_build = |target: &str| {
             Command::new(&make)
                 .current_dir(src_path)
                 .env("GIT_DIR", "/var/empty")
                 .env("MAKEFLAGS", env::var("CARGO_MAKEFLAGS").unwrap())
-                .env(
-                    "CXXFLAGS",
-                    format!(
-                        "{} -DNNUE_EMBEDDING_OFF",
-                        env::var("CXXFLAGS").unwrap_or_default()
-                    ),
-                )
+                .env("CXXFLAGS", &cxxflags)
                 .env_remove("SDE_PATH")
                 .env_remove("WINE_PATH")
-                .args(sde.map(|e| format!("WINE_PATH={e} --")))
-                .args(sde.map(|e| format!("SDE_PATH={e}")))
+                .args(sde.iter().map(|e| format!("WINE_PATH={e} --")))
+                .args(sde.iter().map(|e| format!("SDE_PATH={e}")))
                 .arg("-B")
                 .arg(format!("COMP={comp}"))
                 .arg(format!("CXX={cxx}"))
                 .arg(format!("ARCH={}", self.arch))
                 .arg(format!("EXE={exe}"))
-                .arg(if pgo { "profile-build" } else { "build" })
+                .arg(target)
                 .status()
                 .unwrap()
-                .success(),
-            "$(MAKE) build"
-        );
+                .success()
+        };
+
+        if pgo {
+            if !run_make_build("profile-build") {
+                println!(
+                    "cargo:warning=PGO profile-build failed for {exe} (often GCC 14 + LTO). Falling back to a regular build."
+                );
+                assert!(run_make_build("build"), "$(MAKE) build");
+            }
+        } else {
+            assert!(run_make_build("build"), "$(MAKE) build");
+        }
 
         assert!(
             Command::new(&make)
